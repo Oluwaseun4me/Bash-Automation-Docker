@@ -193,36 +193,18 @@ clone_repository() {
     
     # Verify Docker configuration exists
     if [ ! -f "Dockerfile" ] && [ ! -f "docker-compose.yml" ]; then
-        warn "No Dockerfile or docker-compose.yml found in repository, will create basic one"
+        error "No Dockerfile or docker-compose.yml found in repository"
+        exit 1
     fi
     
     success "Repository processed successfully"
-}
-
-# Function to add host to known_hosts
-add_to_known_hosts() {
-    info "Adding $SSH_IP to known_hosts..."
-    mkdir -p ~/.ssh
-    chmod 700 ~/.ssh
-    ssh-keyscan -H "$SSH_IP" >> ~/.ssh/known_hosts 2>/dev/null || {
-        warn "Failed to add host to known_hosts"
-    }
 }
 
 # Function to test SSH connection
 test_ssh_connection() {
     info "Testing SSH connection to $SSH_USER@$SSH_IP..."
     
-    # First, add the host to known_hosts to avoid verification prompt
-    add_to_known_hosts
-    
-    # Test connection with relaxed settings for initial connection
-    ssh -i "$SSH_KEY_PATH" \
-        -o ConnectTimeout=10 \
-        -o BatchMode=yes \
-        -o StrictHostKeyChecking=no \
-        -o UserKnownHostsFile=/dev/null \
-        "$SSH_USER@$SSH_IP" "echo 'SSH connection successful'" || {
+    ssh -i "$SSH_KEY_PATH" -o ConnectTimeout=10 -o BatchMode=yes "$SSH_USER@$SSH_IP" "echo 'SSH connection successful'" || {
         error "SSH connection failed"
         exit 1
     }
@@ -234,10 +216,7 @@ test_ssh_connection() {
 prepare_remote_environment() {
     info "Preparing remote environment..."
     
-    ssh -i "$SSH_KEY_PATH" \
-        -o StrictHostKeyChecking=no \
-        -o UserKnownHostsFile=/dev/null \
-        "$SSH_USER@$SSH_IP" "
+    ssh -i "$SSH_KEY_PATH" "$SSH_USER@$SSH_IP" "
         set -e
         
         echo 'Updating system packages...'
@@ -274,7 +253,7 @@ prepare_remote_environment() {
         echo 'Docker Compose version:'
         docker-compose --version
         echo 'Nginx version:'
-        nginx -v 2>&1 | head -1
+        nginx -v
     " || {
         error "Failed to prepare remote environment"
         exit 1
@@ -381,7 +360,8 @@ EOF
             docker build -t ${repo_name}_app .
             docker run -d --name ${repo_name}_app -p $APP_PORT:80 ${repo_name}_app
         else
-            echo 'No Docker configuration found, creating a simple Dockerfile...'
+            echo 'ERROR: No Docker configuration found!'
+            echo 'Creating a simple Dockerfile as fallback...'
             cat > Dockerfile << 'DOCKERFILEEOF'
 FROM nginx:alpine
 COPY index.html /usr/share/nginx/html/
@@ -410,112 +390,6 @@ DOCKERFILEEOF
     }
     
     success "Application deployed successfully"
-}
-
-# Function to configure nginx (FIXED VERSION)
-configure_nginx() {
-    info "Configuring Nginx reverse proxy..."
-    
-    local repo_name=$(basename "$REPO_URL" .git)
-    local nginx_config="/etc/nginx/sites-available/${repo_name}"
-    local nginx_enabled="/etc/nginx/sites-enabled/${repo_name}"
-    
-    ssh -i "$SSH_KEY_PATH" \
-        -o StrictHostKeyChecking=no \
-        -o UserKnownHostsFile=/dev/null \
-        "$SSH_USER@$SSH_IP" "
-        set -e
-        
-        # Remove default nginx config if it exists
-        sudo rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
-        
-        # Create nginx config - FIXED: proxy to the correct APP_PORT
-        sudo tee $nginx_config > /dev/null <<EOF
-server {
-    listen 80;
-    server_name _;
-    
-    location / {
-        proxy_pass http://localhost:${APP_PORT};
-        proxy_set_header Host \\\$host;
-        proxy_set_header X-Real-IP \\\$remote_addr;
-        proxy_set_header X-Forwarded-For \\\$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \\\$scheme;
-    }
-    
-    location /health {
-        proxy_pass http://localhost:${APP_PORT}/health;
-        proxy_set_header Host \\\$host;
-    }
-}
-EOF
-        
-        # Enable site
-        sudo ln -sf $nginx_config $nginx_enabled
-        
-        # Test nginx configuration
-        sudo nginx -t || {
-            echo 'Nginx configuration test failed'
-            sudo rm -f $nginx_config $nginx_enabled
-            exit 1
-        }
-        
-        # Reload nginx
-        sudo systemctl reload nginx
-        
-        echo 'Nginx configured successfully'
-    " || {
-        error "Failed to configure Nginx"
-        exit 1
-    }
-    
-    success "Nginx reverse proxy configured successfully"
-}
-# Function to validate deployment
-validate_deployment() {
-    info "Validating deployment..."
-    
-    local repo_name=$(basename "$REPO_URL" .git)
-    
-    # Check if containers are running
-    ssh -i "$SSH_KEY_PATH" \
-        -o StrictHostKeyChecking=no \
-        -o UserKnownHostsFile=/dev/null \
-        "$SSH_USER@$SSH_IP" "
-        set -e
-        
-        echo 'Checking Docker services...'
-        sudo systemctl is-active docker
-        
-        echo 'Checking container status...'
-        if docker ps | grep -q \"${repo_name}\"; then
-            echo 'Application container is running'
-        else
-            echo 'Checking all containers:'
-            docker ps
-            exit 1
-        fi
-        
-        echo 'Checking Nginx status...'
-        sudo systemctl is-active nginx
-        
-        echo 'Testing application internally...'
-        curl -f http://localhost:$APP_PORT || curl -f http://localhost:80 || true
-    " || {
-        warn "Internal validation completed with warnings"
-    }
-    
-    # Test external access
-    info "Testing external access..."
-    if command_exists curl; then
-        if curl -f -m 10 "http://$SSH_IP"; then
-            success "External access test successful"
-        else
-            warn "External access test failed or service not responding immediately"
-        fi
-    fi
-    
-    success "Deployment validation completed"
 }
 
 # Function to display deployment summary
@@ -578,10 +452,7 @@ cleanup_deployment() {
     
     local repo_name=$(basename "${REPO_URL:-}" .git)
     
-    ssh -i "$SSH_KEY_PATH" \
-        -o StrictHostKeyChecking=no \
-        -o UserKnownHostsFile=/dev/null \
-        "$SSH_USER@$SSH_IP" "
+    ssh -i "$SSH_KEY_PATH" "$SSH_USER@$SSH_IP" "
         set -e
         
         echo 'Stopping and removing containers...'
